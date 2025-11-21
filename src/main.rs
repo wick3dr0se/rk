@@ -1,5 +1,3 @@
-use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
-use evdev::{Device, EventSummary, EventType, InputEvent, KeyCode};
 use std::env::var;
 use std::error::Error;
 use std::fs::read_dir;
@@ -7,10 +5,14 @@ use std::process::Command;
 use std::thread::sleep;
 use std::time::Duration;
 
+use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
+use evdev::{Device, EventSummary, EventType, InputEvent, KeyCode, LedCode};
+
 struct KeyRemapper {
     virtual_kbd: VirtualDevice,
     active: bool,
     ctrl_held: bool,
+    numlocked: bool,
 }
 
 impl KeyRemapper {
@@ -22,10 +24,13 @@ impl KeyRemapper {
             virt_kbd = virt_kbd.with_keys(&keys)?;
         }
 
+        let numlocked = template.get_led_state()?.contains(LedCode::LED_NUML);
+
         Ok(Self {
             virtual_kbd: virt_kbd.build()?,
             active: false,
             ctrl_held: false,
+            numlocked,
         })
     }
 
@@ -36,6 +41,11 @@ impl KeyRemapper {
                 KeyCode::KEY_A => Some(KeyCode::KEY_LEFT),
                 KeyCode::KEY_S => Some(KeyCode::KEY_DOWN),
                 KeyCode::KEY_D => Some(KeyCode::KEY_RIGHT),
+                // diagonals
+                KeyCode::KEY_Q if !self.numlocked => Some(KeyCode::KEY_KP7),
+                KeyCode::KEY_E if !self.numlocked => Some(KeyCode::KEY_KP9),
+                KeyCode::KEY_Z if !self.numlocked => Some(KeyCode::KEY_KP1),
+                KeyCode::KEY_C if !self.numlocked => Some(KeyCode::KEY_KP3),
                 _ => None,
             })
             .flatten()
@@ -43,6 +53,9 @@ impl KeyRemapper {
 
     fn process_event(&mut self, event: &InputEvent) -> Result<(), Box<dyn Error>> {
         if let EventSummary::Key(_, key, value) = event.destructure() {
+            if key == KeyCode::KEY_NUMLOCK && value == 1 {
+                self.numlocked = !self.numlocked;
+            }
             if matches!(key, KeyCode::KEY_LEFTCTRL | KeyCode::KEY_RIGHTCTRL) {
                 self.ctrl_held = value != 0;
             }
@@ -68,7 +81,7 @@ impl KeyRemapper {
 
     fn notify(&self) {
         let (msg, beep) = if self.active {
-            ("WASD → Arrows", "\x07\x07")
+            ("WASD+QEZC → Arrows", "\x07\x07")
         } else {
             ("Disabled", "\x07")
         };
