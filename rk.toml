@@ -1,0 +1,27 @@
+# rk configuration file
+# Place in: ./rk.toml, ~/.config/rk.toml, or /etc/rk.toml
+# Or set `RK_CONFIG=/path/to/config.toml`
+
+# Can be a single key: "f12" or a combination: "ctrl+enter"
+# Supported modifiers: ctrl, shift, alt, leftctrl, rightctrl, etc.
+toggle = "leftctrl+enter"
+
+# Always-active key mappings
+# Keys can be written as: "w", "W", or "KEY_W" (case insensitive)
+[mappings]
+w = "up"
+a = "left"
+s = "down"
+d = "right"
+
+# Conditional mappings - only active when NumLock is OFF
+# Useful for diagonal movement in games like Tibia
+[mappings.numlock_off]
+q = "kp7"  # numpad 7 (up-left)
+e = "kp9"  # numpad 9 (up-right)
+z = "kp1"  # numpad 1 (down-left)
+c = "kp3"  # numpad 3 (down-right)
+
+# Future conditional mappings (not yet implemented):
+# [mappings.capslock_on]
+# [mappings.scrolllock_on]
