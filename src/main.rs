@@ -238,11 +238,10 @@ fn find_keyboards() -> Result<Vec<Device>, Box<dyn Error>> {
         }
 
         if let Ok(dev) = Device::open(&path) {
-            // check for grave key to identify keyboards
-            if dev
-                .supported_keys()
-                .map_or(false, |keys| keys.contains(KeyCode::KEY_GRAVE))
-            {
+            // check if keyboard if it has alpha A & doesn't have mouse left
+            if dev.supported_keys().map_or(false, |keys| {
+                keys.contains(KeyCode::KEY_A) && !keys.contains(KeyCode::BTN_LEFT)
+            }) {
                 println!("Found: {} ({:?})", dev.name().unwrap_or("Unknown"), path);
                 keyboards.push(dev);
             }
