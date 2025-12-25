@@ -2,26 +2,26 @@
 # Place in: ./rk.toml, ~/.config/rk.toml, or /etc/rk.toml
 # Or set `RK_CONFIG=/path/to/config.toml`
 
-# Can be a single key: "f12" or a combination: "ctrl+enter"
-# Supported modifiers: ctrl, shift, alt, leftctrl, rightctrl, etc.
-toggle = "leftctrl+enter"
+# Check https://docs.rs/evdev/latest/evdev/struct.Key.html for a reference of key names
+# Keys can be written like: "w", "W", or "KEY_W" (case insensitive)
 
-# Always-active key mappings
-# Keys can be written as: "w", "W", or "KEY_W" (case insensitive)
-[mappings]
+# Can be a single key: "f12" or a combination: "ctrl+enter"
+toggle = "leftctrl+grave"
+
+# Default mappings (always active when remapper is enabled)
+[mappings.default]
 w = "up"
 a = "left"
 s = "down"
 d = "right"
 
-# Conditional mappings - only active when NumLock is OFF
-# Useful for diagonal movement in games like Tibia
+# Conditional mappings based on LED states
 [mappings.numlock_off]
-q = "kp7"  # numpad 7 (up-left)
-e = "kp9"  # numpad 9 (up-right)
-z = "kp1"  # numpad 1 (down-left)
-c = "kp3"  # numpad 3 (down-right)
+q = "kp7" # numpad 7 (up-left)
+e = "kp9" # numpad 9 (up-right)
+z = "kp1" # numpad 1 (down-left)
+c = "kp3" # numpad 3 (down-right)
 
-# Future conditional mappings (not yet implemented):
-# [mappings.capslock_on]
-# [mappings.scrolllock_on]
+# Multiple conditions can be chained
+#[mappings.numlock_off.capslock_on]
+#w = "up"

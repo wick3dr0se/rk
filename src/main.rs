@@ -13,15 +13,8 @@ use evdev::{Device, EventSummary, EventType, InputEvent, KeyCode, LedCode};
 #[derive(Deserialize)]
 struct Config {
     toggle: String,
-    mappings: Mappings,
-}
-
-#[derive(Deserialize)]
-struct Mappings {
-    #[serde(flatten)]
-    regular: HashMap<String, String>,
     #[serde(default)]
-    numlock_off: HashMap<String, String>,
+    mappings: HashMap<String, HashMap<String, String>>,
 }
 
 impl Config {
@@ -47,42 +40,6 @@ impl Config {
     }
 }
 
-struct ToggleMod {
-    modifiers: Vec<KeyCode>,
-    key: KeyCode,
-}
-
-impl ToggleMod {
-    fn parse(s: &str) -> Result<Self, Box<dyn Error>> {
-        let parts: Vec<&str> = s.split('+').map(|p| p.trim()).collect();
-
-        if parts.is_empty() {
-            return Err("Empty toggle combo".into());
-        }
-
-        let key = parse_keycode(parts.last().unwrap()).ok_or("Invalid key in toggle combo")?;
-
-        let mut modifiers = Vec::new();
-        for part in &parts[..parts.len() - 1] {
-            let modifier = parse_keycode(part).ok_or(format!("Invalid modifier: {}", part))?;
-            modifiers.push(modifier);
-        }
-
-        Ok(Self { modifiers, key })
-    }
-
-    fn is_pressed(&self, key: KeyCode, held_keys: &HashMap<KeyCode, bool>) -> bool {
-        // check if this is the trigger key and all modifiers are held
-        if key != self.key {
-            return false;
-        }
-
-        self.modifiers
-            .iter()
-            .all(|m| held_keys.get(m).copied().unwrap_or(false))
-    }
-}
-
 fn parse_keycode(s: &str) -> Option<KeyCode> {
     let normalized = s.to_uppercase().trim_start_matches("KEY_").to_string();
     let key_name = format!("KEY_{}", normalized);
@@ -96,14 +53,72 @@ fn parse_keycode(s: &str) -> Option<KeyCode> {
     None
 }
 
+fn parse_led(s: &str) -> Option<LedCode> {
+    let normalized = s.to_uppercase().trim_start_matches("LED_").to_string();
+    let led_name = format!("LED_{}", normalized);
+
+    for code in 0u16..=15 {
+        let led = LedCode(code);
+        if format!("{:?}", led).eq_ignore_ascii_case(&led_name) {
+            return Some(led);
+        }
+    }
+    None
+}
+
+fn parse_toggle(s: &str) -> Result<(Vec<KeyCode>, KeyCode), Box<dyn Error>> {
+    let parts: Vec<&str> = s.split('+').map(|p| p.trim()).collect();
+
+    if parts.is_empty() {
+        return Err("Empty toggle".into());
+    }
+
+    let key = parse_keycode(parts.last().unwrap()).ok_or("Invalid key in toggle combo")?;
+
+    let modifiers: Result<Vec<_>, Box<dyn Error>> = parts[..parts.len() - 1]
+        .iter()
+        .map(|part| parse_keycode(part).ok_or_else(|| format!("Invalid modifier: {}", part).into()))
+        .collect();
+
+    Ok((modifiers?, key))
+}
+
+fn parse_condition(s: &str) -> Option<(LedCode, bool)> {
+    if let Some(led_name) = s.strip_suffix("_on") {
+        parse_led(led_name).map(|led| (led, true))
+    } else if let Some(led_name) = s.strip_suffix("_off") {
+        parse_led(led_name).map(|led| (led, false))
+    } else {
+        None
+    }
+}
+
+struct MappingRule {
+    from: KeyCode,
+    to: KeyCode,
+    led_conditions: Vec<(LedCode, bool)>,
+}
+
+impl MappingRule {
+    fn matches(&self, key: KeyCode, leds: &[LedCode]) -> bool {
+        if self.from != key {
+            return false;
+        }
+
+        self.led_conditions
+            .iter()
+            .all(|(led, should_be_on)| leds.contains(led) == *should_be_on)
+    }
+}
+
 struct KeyRemapper {
     virtual_kbd: VirtualDevice,
-    active: bool,
-    numlocked: bool,
+    enabled: bool,
     held_keys: HashMap<KeyCode, bool>,
-    toggle_mod: ToggleMod,
-    mappings: HashMap<KeyCode, KeyCode>,
-    numlock_mappings: HashMap<KeyCode, KeyCode>,
+    leds: Vec<LedCode>,
+    toggle_mods: Vec<KeyCode>,
+    toggle_key: KeyCode,
+    rules: Vec<MappingRule>,
 }
 
 impl KeyRemapper {
@@ -111,98 +126,123 @@ impl KeyRemapper {
         #[allow(deprecated)]
         let mut virt_kbd = VirtualDeviceBuilder::new()?.name("rk");
 
-        // clone all supported keys so everything passes through
         if let Some(keys) = template.supported_keys() {
             virt_kbd = virt_kbd.with_keys(&keys)?;
         }
 
-        let numlocked = template.get_led_state()?.contains(LedCode::LED_NUML);
+        let leds = template.get_led_state()?.into_iter().collect();
+        let (toggle_mods, toggle_key) = parse_toggle(&config.toggle)?;
 
-        let mut mappings = HashMap::new();
-        for (from, to) in &config.mappings.regular {
-            if let (Some(from_key), Some(to_key)) = (parse_keycode(from), parse_keycode(to)) {
-                mappings.insert(from_key, to_key);
-            } else {
-                eprintln!("Warning: Invalid mapping {} -> {}", from, to);
-            }
-        }
+        let mut rules = Vec::new();
 
-        let mut numlock_mappings = HashMap::new();
-        for (from, to) in &config.mappings.numlock_off {
-            if let (Some(from_key), Some(to_key)) = (parse_keycode(from), parse_keycode(to)) {
-                numlock_mappings.insert(from_key, to_key);
+        for (section, mappings) in &config.mappings {
+            let led_conditions = if section == "default" {
+                vec![]
             } else {
-                eprintln!("Warning: Invalid numlock mapping {} -> {}", from, to);
+                section.split('.').filter_map(parse_condition).collect()
+            };
+
+            for (from, to) in mappings {
+                match (parse_keycode(from), parse_keycode(to)) {
+                    (Some(from_key), Some(to_key)) => {
+                        rules.push(MappingRule {
+                            from: from_key,
+                            to: to_key,
+                            led_conditions: led_conditions.clone(),
+                        });
+                    }
+                    _ => {
+                        eprintln!(
+                            "Warning: Invalid mapping in [mappings.{}]: {} -> {}",
+                            section, from, to
+                        );
+                    }
+                }
             }
         }
 
         Ok(Self {
             virtual_kbd: virt_kbd.build()?,
-            active: false,
-            numlocked,
+            enabled: false,
             held_keys: HashMap::new(),
-            toggle_mod: ToggleMod::parse(&config.toggle)?,
-            mappings,
-            numlock_mappings,
+            leds,
+            toggle_mods,
+            toggle_key,
+            rules,
         })
     }
 
+    fn is_toggle_pressed(&self, key: KeyCode) -> bool {
+        key == self.toggle_key
+            && self
+                .toggle_mods
+                .iter()
+                .all(|m| self.held_keys.get(m).copied().unwrap_or(false))
+    }
+
+    fn update_led(&mut self, key: KeyCode) {
+        let led = match key {
+            KeyCode::KEY_NUMLOCK => LedCode::LED_NUML,
+            KeyCode::KEY_CAPSLOCK => LedCode::LED_CAPSL,
+            KeyCode::KEY_SCROLLLOCK => LedCode::LED_SCROLLL,
+            _ => return,
+        };
+
+        if self.leds.contains(&led) {
+            self.leds.retain(|&l| l != led);
+        } else {
+            self.leds.push(led);
+        }
+    }
+
     fn remap_key(&self, key: KeyCode) -> Option<KeyCode> {
-        if !self.active {
+        if !self.enabled {
             return None;
         }
 
-        if !self.numlocked {
-            if let Some(&remapped) = self.numlock_mappings.get(&key) {
-                return Some(remapped);
-            }
-        }
-
-        self.mappings.get(&key).copied()
+        self.rules
+            .iter()
+            .find(|r| r.matches(key, &self.leds))
+            .map(|r| r.to)
     }
 
     fn process_event(&mut self, event: &InputEvent) -> Result<(), Box<dyn Error>> {
         if let EventSummary::Key(_, key, value) = event.destructure() {
-            // track all key states for combo detection
             if value == 1 {
+                self.update_led(key);
+            }
+
+            if value == 1 || value == 2 {
                 self.held_keys.insert(key, true);
             } else if value == 0 {
                 self.held_keys.insert(key, false);
             }
 
-            if key == KeyCode::KEY_NUMLOCK && value == 1 {
-                self.numlocked = !self.numlocked;
-            }
-
-            // check for toggle combo
-            if value == 1 && self.toggle_mod.is_pressed(key, &self.held_keys) {
-                self.active = !self.active;
+            if value == 1 && self.is_toggle_pressed(key) {
+                self.enabled = !self.enabled;
                 self.notify();
                 return Ok(());
             }
 
-            // emit remapped key or pass through unchanged
             let event_to_emit = self
                 .remap_key(key)
                 .map(|remapped| InputEvent::new(EventType::KEY.0, remapped.0, value))
                 .unwrap_or(*event);
             self.virtual_kbd.emit(&[event_to_emit])?;
         } else {
-            // pass through non-key events (sync, etc)
             self.virtual_kbd.emit(&[*event])?;
         }
         Ok(())
     }
 
     fn notify(&self) {
-        let (msg, beep) = if self.active {
+        let (msg, beep) = if self.enabled {
             ("Enabled", "\x07\x07")
         } else {
             ("Disabled", "\x07")
         };
 
         if let (Ok(user), Ok(uid)) = (var("SUDO_USER"), var("SUDO_UID")) {
-            // try notify-send, beep if it fails
             if Command::new("sudo")
                 .args([
                     "-u",
@@ -238,7 +278,6 @@ fn find_keyboards() -> Result<Vec<Device>, Box<dyn Error>> {
         }
 
         if let Ok(dev) = Device::open(&path) {
-            // check if keyboard if it has alpha A & doesn't have mouse left
             if dev.supported_keys().map_or(false, |keys| {
                 keys.contains(KeyCode::KEY_A) && !keys.contains(KeyCode::BTN_LEFT)
             }) {
@@ -257,12 +296,11 @@ fn find_keyboards() -> Result<Vec<Device>, Box<dyn Error>> {
 fn main() -> Result<(), Box<dyn Error>> {
     let config = Config::load()?;
     let mut keyboards = find_keyboards()?;
-    // create virtual device that mimics the first keyboard
     let mut remapper = KeyRemapper::new(&keyboards[0], &config)?;
-    // grab exclusive access to prevent duplicate events
     keyboards.iter_mut().try_for_each(|kb| kb.grab())?;
 
-    println!("Press {} to toggle", config.toggle);
+    println!("Loaded {} mapping rules", remapper.rules.len());
+    println!("Press {} to toggle remapping", config.toggle);
 
     loop {
         for kb in &mut keyboards {
